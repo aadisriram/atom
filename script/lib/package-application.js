@@ -18,7 +18,7 @@ module.exports = function () {
     'app-bundle-id': 'com.github.atom',
     'app-copyright': `Copyright © 2014-${(new Date()).getFullYear()} GitHub, Inc. All rights reserved.`,
     'app-version': CONFIG.appMetadata.version,
-    'arch': process.platform === 'win32' ? 'ia32' : 'x64',
+    'arch': process.platform === 'darwin' ? 'x64' : process.arch, // OS X is 64-bit only
     'asar': {unpack: buildAsarUnpackGlobExpression()},
     'build-version': CONFIG.appMetadata.version,
     'download': {cache: CONFIG.electronDownloadPath},
@@ -29,6 +29,7 @@ module.exports = function () {
     'name': appName,
     'out': CONFIG.buildOutputPath,
     'overwrite': true,
+    'deref-symlinks': false,
     'platform': process.platform,
     'version': CONFIG.appMetadata.electronVersion,
     'version-string': {
@@ -73,11 +74,8 @@ function copyNonASARResources (packagedAppPath, bundledResourcesPath) {
   } else if (process.platform === 'linux') {
     fs.copySync(path.join(CONFIG.repositoryRootPath, 'resources', 'app-icons', CONFIG.channel, 'png', '1024.png'), path.join(packagedAppPath, 'atom.png'))
   } else if (process.platform === 'win32') {
-    fs.copySync(path.join('resources', 'win', 'atom.cmd'), path.join(bundledResourcesPath, 'cli', 'atom.cmd'))
-    fs.copySync(path.join('resources', 'win', 'atom.sh'), path.join(bundledResourcesPath, 'cli', 'atom.sh'))
-    fs.copySync(path.join('resources', 'win', 'atom.js'), path.join(bundledResourcesPath, 'cli', 'atom.js'))
-    fs.copySync(path.join('resources', 'win', 'apm.cmd'), path.join(bundledResourcesPath, 'cli', 'apm.cmd'))
-    fs.copySync(path.join('resources', 'win', 'apm.sh'), path.join(bundledResourcesPath, 'cli', 'apm.sh'))
+    [ 'atom.cmd', 'atom.sh', 'atom.js', 'apm.cmd', 'apm.sh', 'file.ico', 'folder.ico' ]
+      .forEach(file => fs.copySync(path.join('resources', 'win', file), path.join(bundledResourcesPath, 'cli', file)))
   }
 
   console.log(`Writing LICENSE.md to ${bundledResourcesPath}`)
@@ -107,6 +105,8 @@ function buildAsarUnpackGlobExpression () {
     'ctags-linux',
     'ctags-win32.exe',
     path.join('**', 'node_modules', 'spellchecker', '**'),
+    path.join('**', 'node_modules', 'dugite', 'git', '**'),
+    path.join('**', 'node_modules', 'github', 'bin', '**'),
     path.join('**', 'resources', 'atom.png')
   ]
 
@@ -115,7 +115,7 @@ function buildAsarUnpackGlobExpression () {
 
 function getAppName () {
   if (process.platform === 'darwin') {
-    return CONFIG.channel === 'beta' ? 'Atom Beta' : 'Atom'
+    return CONFIG.appName
   } else {
     return 'atom'
   }
@@ -157,7 +157,7 @@ function renamePackagedAppDir (packageOutputDirPath) {
     if (fs.existsSync(packagedAppPath)) fs.removeSync(packagedAppPath)
     fs.renameSync(path.join(packageOutputDirPath, appBundleName), packagedAppPath)
   } else if (process.platform === 'linux') {
-    const appName = CONFIG.channel === 'beta' ? 'atom-beta' : 'atom'
+    const appName = CONFIG.channel !== 'stable' ? `atom-${CONFIG.channel}` : 'atom'
     let architecture
     if (process.arch === 'ia32') {
       architecture = 'i386'
@@ -170,8 +170,10 @@ function renamePackagedAppDir (packageOutputDirPath) {
     if (fs.existsSync(packagedAppPath)) fs.removeSync(packagedAppPath)
     fs.renameSync(packageOutputDirPath, packagedAppPath)
   } else {
-    const appName = CONFIG.channel === 'beta' ? 'Atom Beta' : 'Atom'
-    packagedAppPath = path.join(CONFIG.buildOutputPath, appName)
+    packagedAppPath = path.join(CONFIG.buildOutputPath, CONFIG.appName)
+    if (process.platform === 'win32' && process.arch !== 'ia32') {
+      packagedAppPath += ` ${process.arch}`
+    }
     if (fs.existsSync(packagedAppPath)) fs.removeSync(packagedAppPath)
     fs.renameSync(packageOutputDirPath, packagedAppPath)
   }

@@ -7,11 +7,12 @@ fs = require 'fs-plus'
 Grim = require 'grim'
 pathwatcher = require 'pathwatcher'
 FindParentDir = require 'find-parent-dir'
+{CompositeDisposable} = require 'event-kit'
 
 TextEditor = require '../src/text-editor'
 TextEditorElement = require '../src/text-editor-element'
-TokenizedBuffer = require '../src/tokenized-buffer'
-clipboard = require '../src/safe-clipboard'
+TextMateLanguageMode = require '../src/text-mate-language-mode'
+{clipboard} = require 'electron'
 
 jasmineStyle = document.createElement('style')
 jasmineStyle.textContent = atom.themes.loadStylesheet(atom.themes.resolveStylesheet('../static/jasmine'))
@@ -49,7 +50,7 @@ if process.env.CI
 else
   jasmine.getEnv().defaultTimeoutInterval = 5000
 
-{resourcePath, testPaths} = atom.getLoadSettings()
+{testPaths} = atom.getLoadSettings()
 
 if specPackagePath = FindParentDir.sync(testPaths[0], 'package.json')
   packageMetadata = require(path.join(specPackagePath, 'package.json'))
@@ -58,15 +59,17 @@ if specPackagePath = FindParentDir.sync(testPaths[0], 'package.json')
 if specDirectory = FindParentDir.sync(testPaths[0], 'fixtures')
   specProjectPath = path.join(specDirectory, 'fixtures')
 else
-  specProjectPath = path.join(__dirname, 'fixtures')
+  specProjectPath = require('os').tmpdir()
 
 beforeEach ->
-  documentTitle = null
+  # Do not clobber recent project history
+  spyOn(Object.getPrototypeOf(atom.history), 'saveState').andReturn(Promise.resolve())
 
   atom.project.setPaths([specProjectPath])
 
   window.resetTimeouts()
   spyOn(_._, "now").andCallFake -> window.now
+  spyOn(Date, 'now').andCallFake(-> window.now)
   spyOn(window, "setTimeout").andCallFake window.fakeSetTimeout
   spyOn(window, "clearTimeout").andCallFake window.fakeClearTimeout
 
@@ -97,8 +100,21 @@ beforeEach ->
   spyOn(TextEditor.prototype, "shouldPromptToSave").andReturn false
 
   # make tokenization synchronous
-  TokenizedBuffer.prototype.chunkSize = Infinity
-  spyOn(TokenizedBuffer.prototype, "tokenizeInBackground").andCallFake -> @tokenizeNextChunk()
+  TextMateLanguageMode.prototype.chunkSize = Infinity
+  spyOn(TextMateLanguageMode.prototype, "tokenizeInBackground").andCallFake -> @tokenizeNextChunk()
+
+  # Without this spy, TextEditor.onDidTokenize callbacks would not be called
+  # after the buffer's language mode changed, because by the time the editor
+  # called its new language mode's onDidTokenize method, the language mode
+  # would already be fully tokenized.
+  spyOn(TextEditor.prototype, "onDidTokenize").andCallFake (callback) ->
+    new CompositeDisposable(
+      @emitter.on("did-tokenize", callback),
+      @onDidChangeGrammar =>
+        languageMode = @buffer.getLanguageMode()
+        if languageMode.tokenizeInBackground?.originalValue
+          callback()
+    )
 
   clipboardContent = 'initial clipboard content'
   spyOn(clipboard, 'writeText').andCallFake (text) -> clipboardContent = text
@@ -107,12 +123,16 @@ beforeEach ->
   addCustomMatchers(this)
 
 afterEach ->
-  atom.reset()
+  ensureNoDeprecatedFunctionCalls()
+  ensureNoDeprecatedStylesheets()
 
-  document.getElementById('jasmine-content').innerHTML = '' unless window.debugContent
+  waitsForPromise ->
+    atom.reset()
 
-  warnIfLeakingPathSubscriptions()
-  waits(0) # yield to ui thread to make screen update more frequently
+  runs ->
+    document.getElementById('jasmine-content').innerHTML = '' unless window.debugContent
+    warnIfLeakingPathSubscriptions()
+    waits(0) # yield to ui thread to make screen update more frequently
 
 warnIfLeakingPathSubscriptions = ->
   watchedPaths = pathwatcher.getWatchedPaths()
@@ -120,8 +140,9 @@ warnIfLeakingPathSubscriptions = ->
     console.error("WARNING: Leaking subscriptions for paths: " + watchedPaths.join(", "))
   pathwatcher.closeAllWatchers()
 
-ensureNoDeprecatedFunctionsCalled = ->
-  deprecations = Grim.getDeprecations()
+ensureNoDeprecatedFunctionCalls = ->
+  deprecations = _.clone(Grim.getDeprecations())
+  Grim.clearDeprecations()
   if deprecations.length > 0
     originalPrepareStackTrace = Error.prepareStackTrace
     Error.prepareStackTrace = (error, stack) ->
@@ -138,8 +159,18 @@ ensureNoDeprecatedFunctionsCalled = ->
     error = new Error("Deprecated function(s) #{deprecations.map(({originName}) -> originName).join ', '}) were called.")
     error.stack
     Error.prepareStackTrace = originalPrepareStackTrace
-
     throw error
+
+ensureNoDeprecatedStylesheets = ->
+  deprecations = _.clone(atom.styles.getDeprecations())
+  atom.styles.clearDeprecations()
+  for sourcePath, deprecation of deprecations
+    title =
+      if sourcePath isnt 'undefined'
+        "Deprecated stylesheet at '#{sourcePath}':"
+      else
+        "Deprecated stylesheet:"
+    throw new Error("#{title}\n#{deprecation.message}")
 
 emitObject = jasmine.StringPrettyPrinter.prototype.emitObject
 jasmine.StringPrettyPrinter.prototype.emitObject = (obj) ->
@@ -156,17 +187,21 @@ jasmine.attachToDOM = (element) ->
   jasmineContent = document.querySelector('#jasmine-content')
   jasmineContent.appendChild(element) unless jasmineContent.contains(element)
 
-deprecationsSnapshot = null
+grimDeprecationsSnapshot = null
+stylesDeprecationsSnapshot = null
 jasmine.snapshotDeprecations = ->
-  deprecationsSnapshot = _.clone(Grim.deprecations)
+  grimDeprecationsSnapshot = _.clone(Grim.deprecations)
+  stylesDeprecationsSnapshot = _.clone(atom.styles.deprecationsBySourcePath)
 
 jasmine.restoreDeprecationsSnapshot = ->
-  Grim.deprecations = deprecationsSnapshot
+  Grim.deprecations = grimDeprecationsSnapshot
+  atom.styles.deprecationsBySourcePath = stylesDeprecationsSnapshot
 
 jasmine.useRealClock = ->
   jasmine.unspy(window, 'setTimeout')
   jasmine.unspy(window, 'clearTimeout')
   jasmine.unspy(_._, 'now')
+  jasmine.unspy(Date, 'now')
 
 # The clock is halfway mocked now in a sad and terrible way... only setTimeout
 # and clearTimeout are included. This method will also include setInterval. We
